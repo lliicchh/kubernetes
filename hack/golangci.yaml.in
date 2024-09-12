@@ -140,11 +140,15 @@ linters:
     - ginkgolinter
     - gocritic
     - govet
+    {{- if .Hints}}
+    - errorlint
+    {{- end}}
     - ineffassign
     - logcheck
     - revive
     - staticcheck
     - stylecheck
+    - testifylint
     - unused
   {{- if .Strict}}
   disable:
@@ -159,6 +163,9 @@ linters-settings: # please keep this alphabetized
       path: ../_output/local/bin/logcheck.so
       description: structured logging checker
       original-url: k8s.io/logtools/logcheck
+      settings:
+        config: |
+          {{include "hack/logcheck.conf" | indent 10 | trim}}
   forbidigo:
     analyze-types: true
     forbid:
@@ -168,6 +175,14 @@ linters-settings: # please keep this alphabetized
     - p: \.Extract
       pkg: ^k8s\.io/client-go/applyconfigurations/
       msg: should not be used because managedFields was removed
+    {{- if .Hints}}
+    - p: ^gomega\.BeTrue$
+      pkg: ^github.com/onsi/gomega$
+      msg: "it does not produce a good failure message - use BeTrueBecause with an explicit printf-style failure message instead, or plain Go: if ... { ginkgo.Fail(...) }"
+    - p: ^gomega\.BeFalse$
+      pkg: ^github.com/onsi/gomega$
+      msg: "it does not produce a good failure message - use BeFalseBecause with an explicit printf-style failure message instead, or plain Go: if ... { ginkgo.Fail(...) }"
+    {{- end}}
   {{- if .Base }}
   gocritic:
     enabled-checks:
@@ -186,9 +201,24 @@ linters-settings: # please keep this alphabetized
       {{- if .Base }}
       - "-SA1019"  # TODO(fix) Using a deprecated function, variable, constant or field
       - "-SA2002"  # TODO(fix) Called testing.T.FailNow or SkipNow in a goroutine, which isn’t allowed
+      - "-SA1006"  # TODO(fix) Using a printf-style function with a dynamic format string and no arguments can just use a print-style func
       {{- end}}
   {{- if .Base }}
   stylecheck:
     checks:
       - "ST1019"   # Importing the same package multiple times
   {{- end}}
+  testifylint:
+    enable-all: true
+    {{- if .Base}}
+    disable:  # TODO: remove each disabled rule and fix it
+      - blank-import
+      - compares
+      - error-is-as
+      - error-nil
+      - expected-actual
+      - float-compare
+      - go-require
+      - nil-compare
+      - require-error
+    {{- end}}

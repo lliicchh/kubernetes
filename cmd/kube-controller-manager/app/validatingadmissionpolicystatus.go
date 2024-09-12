@@ -20,9 +20,8 @@ import (
 	"context"
 
 	apiextensionsscheme "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/scheme"
-	pluginvalidatingadmissionpolicy "k8s.io/apiserver/pkg/admission/plugin/validatingadmissionpolicy"
+	pluginvalidatingadmissionpolicy "k8s.io/apiserver/pkg/admission/plugin/policy/validating"
 	"k8s.io/apiserver/pkg/cel/openapi/resolver"
-	genericfeatures "k8s.io/apiserver/pkg/features"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/controller-manager/controller"
@@ -33,11 +32,9 @@ import (
 
 func newValidatingAdmissionPolicyStatusControllerDescriptor() *ControllerDescriptor {
 	return &ControllerDescriptor{
-		name:     names.ValidatingAdmissionPolicyStatusController,
-		initFunc: startValidatingAdmissionPolicyStatusController,
-		requiredFeatureGates: []featuregate.Feature{
-			genericfeatures.ValidatingAdmissionPolicy,
-		},
+		name:                 names.ValidatingAdmissionPolicyStatusController,
+		initFunc:             startValidatingAdmissionPolicyStatusController,
+		requiredFeatureGates: []featuregate.Feature{},
 	}
 }
 
@@ -52,8 +49,8 @@ func startValidatingAdmissionPolicyStatusController(ctx context.Context, control
 		RestMapper:     controllerContext.RESTMapper,
 	}
 	c, err := validatingadmissionpolicystatus.NewController(
-		controllerContext.InformerFactory.Admissionregistration().V1beta1().ValidatingAdmissionPolicies(),
-		controllerContext.ClientBuilder.ClientOrDie(names.ValidatingAdmissionPolicyStatusController).AdmissionregistrationV1beta1().ValidatingAdmissionPolicies(),
+		controllerContext.InformerFactory.Admissionregistration().V1().ValidatingAdmissionPolicies(),
+		controllerContext.ClientBuilder.ClientOrDie(names.ValidatingAdmissionPolicyStatusController).AdmissionregistrationV1().ValidatingAdmissionPolicies(),
 		typeChecker,
 	)
 

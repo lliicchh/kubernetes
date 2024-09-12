@@ -270,9 +270,7 @@ type Controller struct {
 	// Controller will not proactively sync node health, but will monitor node
 	// health signal updated from kubelet. There are 2 kinds of node healthiness
 	// signals: NodeStatus and NodeLease. If it doesn't receive update for this amount
-	// of time, it will start posting "NodeReady==ConditionUnknown". The amount of
-	// time before which Controller start evicting pods is controlled via flag
-	// 'pod-eviction-timeout'.
+	// of time, it will start posting "NodeReady==ConditionUnknown".
 	// Note: be cautious when changing the constant, it must work with
 	// nodeStatusUpdateFrequency in kubelet and renewInterval in NodeLease
 	// controller. The node health signal update frequency is the minimal of the
@@ -284,7 +282,11 @@ type Controller struct {
 	//    be less than the node health signal update frequency, since there will
 	//    only be fresh values from Kubelet at an interval of node health signal
 	//    update frequency.
-	// 2. nodeMonitorGracePeriod can't be too large for user experience - larger
+	// 2. nodeMonitorGracePeriod should be greater than the sum of HTTP2_PING_TIMEOUT_SECONDS (30s)
+	// 	  and HTTP2_READ_IDLE_TIMEOUT_SECONDS (15s) from the http2 health check
+	// 	  to ensure that the server has adequate time to handle slow or idle connections
+	//    properly before marking a node as unhealthy.
+	// 3. nodeMonitorGracePeriod can't be too large for user experience - larger
 	//    value takes longer for user to see up-to-date node health.
 	nodeMonitorGracePeriod time.Duration
 
@@ -297,8 +299,8 @@ type Controller struct {
 	largeClusterThreshold       int32
 	unhealthyZoneThreshold      float32
 
-	nodeUpdateQueue workqueue.Interface
-	podUpdateQueue  workqueue.RateLimitingInterface
+	nodeUpdateQueue workqueue.TypedInterface[string]
+	podUpdateQueue  workqueue.TypedRateLimitingInterface[podUpdateItem]
 }
 
 // NewNodeLifecycleController returns a new taint controller.
@@ -323,7 +325,7 @@ func NewNodeLifecycleController(
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 
-	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster := record.NewBroadcaster(record.WithContext(ctx))
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "node-controller"})
 
 	nc := &Controller{
@@ -344,8 +346,13 @@ func NewNodeLifecycleController(
 		secondaryEvictionLimiterQPS: secondaryEvictionLimiterQPS,
 		largeClusterThreshold:       largeClusterThreshold,
 		unhealthyZoneThreshold:      unhealthyZoneThreshold,
-		nodeUpdateQueue:             workqueue.NewNamed("node_lifecycle_controller"),
-		podUpdateQueue:              workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "node_lifecycle_controller_pods"),
+		nodeUpdateQueue:             workqueue.NewTypedWithConfig(workqueue.TypedQueueConfig[string]{Name: "node_lifecycle_controller"}),
+		podUpdateQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[podUpdateItem](),
+			workqueue.TypedRateLimitingQueueConfig[podUpdateItem]{
+				Name: "node_lifecycle_controller_pods",
+			},
+		),
 	}
 
 	nc.enterPartialDisruptionFunc = nc.ReducedQPSFunc
@@ -454,7 +461,7 @@ func (nc *Controller) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
 
 	// Start events processing pipeline.
-	nc.broadcaster.StartStructuredLogging(0)
+	nc.broadcaster.StartStructuredLogging(3)
 	logger := klog.FromContext(ctx)
 	logger.Info("Sending events to api server")
 	nc.broadcaster.StartRecordingToSink(
@@ -515,7 +522,7 @@ func (nc *Controller) doNodeProcessingPassWorker(ctx context.Context) {
 		if shutdown {
 			return
 		}
-		nodeName := obj.(string)
+		nodeName := obj
 		if err := nc.doNoScheduleTaintingPass(ctx, nodeName); err != nil {
 			logger.Error(err, "Failed to taint NoSchedule on node, requeue it", "node", klog.KRef("", nodeName))
 			// TODO(k82cn): Add nodeName back to the queue
@@ -623,6 +630,11 @@ func (nc *Controller) doNoExecuteTaintingPass(ctx context.Context) {
 				return false, 50 * time.Millisecond
 			}
 			_, condition := controllerutil.GetNodeCondition(&node.Status, v1.NodeReady)
+			if condition == nil {
+				logger.Info("Failed to get NodeCondition from the node status", "node", klog.KRef("", value.Value))
+				// retry in 50 millisecond
+				return false, 50 * time.Millisecond
+			}
 			// Because we want to mimic NodeStatus.Condition["Ready"] we make "unreachable" and "not ready" taints mutually exclusive.
 			taintToAdd := v1.Taint{}
 			oppositeTaint := v1.Taint{}
@@ -1091,7 +1103,7 @@ func (nc *Controller) doPodProcessingWorker(ctx context.Context) {
 			return
 		}
 
-		podItem := obj.(podUpdateItem)
+		podItem := obj
 		nc.processPod(ctx, podItem)
 	}
 }

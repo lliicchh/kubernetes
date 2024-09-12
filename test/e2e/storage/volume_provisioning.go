@@ -27,7 +27,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -42,7 +41,6 @@ import (
 	e2eauth "k8s.io/kubernetes/test/e2e/framework/auth"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
-	"k8s.io/kubernetes/test/e2e/framework/providers/gce"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/testsuites"
@@ -54,23 +52,6 @@ const (
 	// Plugin name of the external provisioner
 	externalPluginName = "example.com/nfs"
 )
-
-func checkGCEPD(volume *v1.PersistentVolume, volumeType string) error {
-	cloud, err := gce.GetGCECloud()
-	if err != nil {
-		return err
-	}
-	diskName := volume.Spec.GCEPersistentDisk.PDName
-	disk, err := cloud.GetDiskByNameUnknownZone(diskName)
-	if err != nil {
-		return err
-	}
-
-	if !strings.HasSuffix(disk.Type, volumeType) {
-		return fmt.Errorf("unexpected disk type %q, expected suffix %q", disk.Type, volumeType)
-	}
-	return nil
-}
 
 var _ = utils.SIGDescribe("Dynamic Provisioning", func() {
 	f := framework.NewDefaultFramework("volume-provisioning")
@@ -108,9 +89,6 @@ var _ = utils.SIGDescribe("Dynamic Provisioning", func() {
 					PvCheck: func(ctx context.Context, claim *v1.PersistentVolumeClaim) {
 						volume := testsuites.PVWriteReadSingleNodeCheck(ctx, c, f.Timeouts, claim, e2epod.NodeSelection{})
 						gomega.Expect(volume).NotTo(gomega.BeNil(), "get bound PV")
-
-						err := checkGCEPD(volume, "pd-ssd")
-						framework.ExpectNoError(err, "checkGCEPD pd-ssd")
 					},
 				},
 				{
@@ -126,9 +104,6 @@ var _ = utils.SIGDescribe("Dynamic Provisioning", func() {
 					PvCheck: func(ctx context.Context, claim *v1.PersistentVolumeClaim) {
 						volume := testsuites.PVWriteReadSingleNodeCheck(ctx, c, f.Timeouts, claim, e2epod.NodeSelection{})
 						gomega.Expect(volume).NotTo(gomega.BeNil(), "get bound PV")
-
-						err := checkGCEPD(volume, "pd-standard")
-						framework.ExpectNoError(err, "checkGCEPD pd-standard")
 					},
 				},
 				// AWS
@@ -314,9 +289,6 @@ var _ = utils.SIGDescribe("Dynamic Provisioning", func() {
 				PvCheck: func(ctx context.Context, claim *v1.PersistentVolumeClaim) {
 					volume := testsuites.PVWriteReadSingleNodeCheck(ctx, c, f.Timeouts, claim, e2epod.NodeSelection{})
 					gomega.Expect(volume).NotTo(gomega.BeNil(), "get bound PV")
-
-					err := checkGCEPD(volume, "pd-standard")
-					framework.ExpectNoError(err, "checkGCEPD")
 				},
 			}
 			test.Class = newStorageClass(test, ns, "reclaimpolicy")
@@ -577,7 +549,7 @@ var _ = utils.SIGDescribe("Dynamic Provisioning", func() {
 
 			// The claim should timeout phase:Pending
 			err = e2epv.WaitForPersistentVolumeClaimPhase(ctx, v1.ClaimBound, c, ns, claim.Name, 2*time.Second, framework.ClaimProvisionShortTimeout)
-			framework.ExpectError(err)
+			gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("not all in phase Bound")))
 			framework.Logf(err.Error())
 			claim, err = c.CoreV1().PersistentVolumeClaims(ns).Get(ctx, claim.Name, metav1.GetOptions{})
 			framework.ExpectNoError(err)
@@ -616,7 +588,7 @@ var _ = utils.SIGDescribe("Dynamic Provisioning", func() {
 
 			// The claim should timeout phase:Pending
 			err = e2epv.WaitForPersistentVolumeClaimPhase(ctx, v1.ClaimBound, c, ns, claim.Name, 2*time.Second, framework.ClaimProvisionShortTimeout)
-			framework.ExpectError(err)
+			gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("not all in phase Bound")))
 			framework.Logf(err.Error())
 			claim, err = c.CoreV1().PersistentVolumeClaims(ns).Get(ctx, claim.Name, metav1.GetOptions{})
 			framework.ExpectNoError(err)
@@ -721,80 +693,6 @@ func updateDefaultStorageClass(ctx context.Context, c clientset.Interface, scNam
 	verifyDefaultStorageClass(ctx, c, scName, expectedDefault)
 }
 
-func getDefaultPluginName() string {
-	switch {
-	case framework.ProviderIs("gke"), framework.ProviderIs("gce"):
-		return "kubernetes.io/gce-pd"
-	case framework.ProviderIs("aws"):
-		return "kubernetes.io/aws-ebs"
-	case framework.ProviderIs("openstack"):
-		return "kubernetes.io/cinder"
-	case framework.ProviderIs("vsphere"):
-		return "kubernetes.io/vsphere-volume"
-	case framework.ProviderIs("azure"):
-		return "kubernetes.io/azure-disk"
-	}
-	return ""
-}
-
-func newStorageClass(t testsuites.StorageClassTest, ns string, prefix string) *storagev1.StorageClass {
-	pluginName := t.Provisioner
-	if pluginName == "" {
-		pluginName = getDefaultPluginName()
-	}
-	if prefix == "" {
-		prefix = "sc"
-	}
-	bindingMode := storagev1.VolumeBindingImmediate
-	if t.DelayBinding {
-		bindingMode = storagev1.VolumeBindingWaitForFirstConsumer
-	}
-	if t.Parameters == nil {
-		t.Parameters = make(map[string]string)
-	}
-
-	if framework.NodeOSDistroIs("windows") {
-		// fstype might be forced from outside, in that case skip setting a default
-		if _, exists := t.Parameters["fstype"]; !exists {
-			t.Parameters["fstype"] = e2epv.GetDefaultFSType()
-			framework.Logf("settings a default fsType=%s in the storage class", t.Parameters["fstype"])
-		}
-	}
-
-	sc := getStorageClass(pluginName, t.Parameters, &bindingMode, t.MountOptions, ns, prefix)
-	if t.AllowVolumeExpansion {
-		sc.AllowVolumeExpansion = &t.AllowVolumeExpansion
-	}
-	return sc
-}
-
-func getStorageClass(
-	provisioner string,
-	parameters map[string]string,
-	bindingMode *storagev1.VolumeBindingMode,
-	mountOptions []string,
-	ns string,
-	prefix string,
-) *storagev1.StorageClass {
-	if bindingMode == nil {
-		defaultBindingMode := storagev1.VolumeBindingImmediate
-		bindingMode = &defaultBindingMode
-	}
-	return &storagev1.StorageClass{
-		TypeMeta: metav1.TypeMeta{
-			Kind: "StorageClass",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			// Name must be unique, so let's base it on namespace name and the prefix (the prefix is test specific)
-			GenerateName: ns + "-" + prefix,
-		},
-		Provisioner:       provisioner,
-		Parameters:        parameters,
-		VolumeBindingMode: bindingMode,
-		MountOptions:      mountOptions,
-	}
-}
-
 // waitForProvisionedVolumesDelete is a polling wrapper to scan all PersistentVolumes for any associated to the test's
 // StorageClass.  Returns either an error and nil values or the remaining PVs and their count.
 func waitForProvisionedVolumesDeleted(ctx context.Context, c clientset.Interface, scName string) ([]*v1.PersistentVolume, error) {
@@ -819,7 +717,7 @@ func waitForProvisionedVolumesDeleted(ctx context.Context, c clientset.Interface
 		return true, nil // No PVs remain
 	})
 	if err != nil {
-		return remainingPVs, fmt.Errorf("Error waiting for PVs to be deleted: %w", err)
+		return remainingPVs, fmt.Errorf("error waiting for PVs to be deleted: %w", err)
 	}
 	return nil, nil
 }

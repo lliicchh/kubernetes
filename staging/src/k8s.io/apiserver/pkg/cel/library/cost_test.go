@@ -19,15 +19,19 @@ package library
 import (
 	"context"
 	"fmt"
+	"github.com/google/cel-go/common/types/ref"
 	"testing"
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/checker"
+	"github.com/google/cel-go/common"
+	"github.com/google/cel-go/common/ast"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/ext"
 	exprpb "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
 
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	apiservercel "k8s.io/apiserver/pkg/cel"
 )
 
 const (
@@ -204,12 +208,295 @@ func TestURLsCost(t *testing.T) {
 			expectEsimatedCost: checker.CostEstimate{Min: 4, Max: 4},
 			expectRuntimeCost:  4,
 		},
+		{
+			ops:                []string{" == url('https:://kubernetes.io/')"},
+			expectEsimatedCost: checker.CostEstimate{Min: 7, Max: 9},
+			expectRuntimeCost:  7,
+		},
+		{
+			ops:                []string{" == url('http://x.b')"},
+			expectEsimatedCost: checker.CostEstimate{Min: 5, Max: 5},
+			expectRuntimeCost:  5,
+		},
 	}
 
 	for _, tc := range cases {
 		for _, op := range tc.ops {
 			t.Run("url."+op, func(t *testing.T) {
 				testCost(t, "url('https:://kubernetes.io/')"+op, tc.expectEsimatedCost, tc.expectRuntimeCost)
+			})
+		}
+	}
+}
+
+func TestIPCost(t *testing.T) {
+	ipv4 := "ip('192.168.0.1')"
+	ipv4BaseEstimatedCost := checker.CostEstimate{Min: 2, Max: 2}
+	ipv4BaseRuntimeCost := uint64(2)
+
+	ipv6 := "ip('2001:db8:3333:4444:5555:6666:7777:8888')"
+	ipv6BaseEstimatedCost := checker.CostEstimate{Min: 4, Max: 4}
+	ipv6BaseRuntimeCost := uint64(4)
+
+	testCases := []struct {
+		ops                []string
+		expectEsimatedCost func(checker.CostEstimate) checker.CostEstimate
+		expectRuntimeCost  func(uint64) uint64
+	}{
+		{
+			// For just parsing the IP, the cost is expected to be the base.
+			ops:                []string{""},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate { return c },
+			expectRuntimeCost:  func(c uint64) uint64 { return c },
+		},
+		{
+			ops: []string{".family()", ".isUnspecified()", ".isLoopback()", ".isLinkLocalMulticast()", ".isLinkLocalUnicast()", ".isGlobalUnicast()"},
+			// For most other operations, the cost is expected to be the base + 1.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 1, Max: c.Max + 1}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 1 },
+		},
+		{
+			ops: []string{" == ip('192.168.0.1')"},
+			// For most other operations, the cost is expected to be the base + 1.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return c.Add(ipv4BaseEstimatedCost).Add(checker.CostEstimate{Min: 1, Max: 1})
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + ipv4BaseRuntimeCost + 1 },
+		},
+	}
+
+	for _, tc := range testCases {
+		for _, op := range tc.ops {
+			t.Run(ipv4+op, func(t *testing.T) {
+				testCost(t, ipv4+op, tc.expectEsimatedCost(ipv4BaseEstimatedCost), tc.expectRuntimeCost(ipv4BaseRuntimeCost))
+			})
+
+			t.Run(ipv6+op, func(t *testing.T) {
+				testCost(t, ipv6+op, tc.expectEsimatedCost(ipv6BaseEstimatedCost), tc.expectRuntimeCost(ipv6BaseRuntimeCost))
+			})
+		}
+	}
+}
+
+func TestIPIsCanonicalCost(t *testing.T) {
+	testCases := []struct {
+		op                 string
+		expectEsimatedCost checker.CostEstimate
+		expectRuntimeCost  uint64
+	}{
+		{
+			op:                 "ip.isCanonical('192.168.0.1')",
+			expectEsimatedCost: checker.CostEstimate{Min: 3, Max: 3},
+			expectRuntimeCost:  3,
+		},
+		{
+			op:                 "ip.isCanonical('2001:db8:3333:4444:5555:6666:7777:8888')",
+			expectEsimatedCost: checker.CostEstimate{Min: 8, Max: 8},
+			expectRuntimeCost:  8,
+		},
+		{
+			op:                 "ip.isCanonical('2001:db8::abcd')",
+			expectEsimatedCost: checker.CostEstimate{Min: 3, Max: 3},
+			expectRuntimeCost:  3,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.op, func(t *testing.T) {
+			testCost(t, tc.op, tc.expectEsimatedCost, tc.expectRuntimeCost)
+		})
+	}
+}
+
+func TestCIDRCost(t *testing.T) {
+	ipv4 := "cidr('192.168.0.0/16')"
+	ipv4BaseEstimatedCost := checker.CostEstimate{Min: 2, Max: 2}
+	ipv4BaseRuntimeCost := uint64(2)
+
+	ipv6 := "cidr('2001:db8::/32')"
+	ipv6BaseEstimatedCost := checker.CostEstimate{Min: 2, Max: 2}
+	ipv6BaseRuntimeCost := uint64(2)
+
+	type testCase struct {
+		ops                []string
+		expectEsimatedCost func(checker.CostEstimate) checker.CostEstimate
+		expectRuntimeCost  func(uint64) uint64
+	}
+
+	cases := []testCase{
+		{
+			// For just parsing the IP, the cost is expected to be the base.
+			ops:                []string{""},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate { return c },
+			expectRuntimeCost:  func(c uint64) uint64 { return c },
+		},
+		{
+			ops: []string{".ip()", ".prefixLength()", ".masked()"},
+			// For most other operations, the cost is expected to be the base + 1.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 1, Max: c.Max + 1}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 1 },
+		},
+		{
+			ops: []string{" == cidr('2001:db8::/32')"},
+			// For most other operations, the cost is expected to be the base + 1.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return c.Add(ipv6BaseEstimatedCost).Add(checker.CostEstimate{Min: 1, Max: 1})
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + ipv6BaseRuntimeCost + 1 },
+		},
+	}
+
+	//nolint:gocritic
+	ipv4Cases := append(cases, []testCase{
+		{
+			ops: []string{".containsCIDR(cidr('192.0.0.0/30'))"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsCIDR(cidr('192.168.0.0/16'))"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsCIDR('192.0.0.0/30')"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsCIDR('192.168.0.0/16')"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsIP(ip('192.0.0.1'))"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 2, Max: c.Max + 5}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 2 },
+		},
+		{
+			ops: []string{".containsIP(ip('192.169.0.1'))"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 3, Max: c.Max + 6}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 3 },
+		},
+		{
+			ops: []string{".containsIP(ip('192.169.169.250'))"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 3, Max: c.Max + 6}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 3 },
+		},
+		{
+			ops: []string{".containsIP('192.0.0.1')"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 2, Max: c.Max + 5}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 2 },
+		},
+		{
+			ops: []string{".containsIP('192.169.0.1')"},
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 3, Max: c.Max + 6}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 3 },
+		},
+	}...)
+
+	//nolint:gocritic
+	ipv6Cases := append(cases, []testCase{
+		{
+			ops: []string{".containsCIDR(cidr('2001:db8::/126'))"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsCIDR(cidr('2001:db8::/32'))"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsCIDR('2001:db8::/126')"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsCIDR('2001:db8::/32')"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 9}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsIP(ip('2001:db8:3333:4444:5555:6666:7777:8888'))"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 8}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsIP(ip('2001:db8::1'))"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 3, Max: c.Max + 6}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 3 },
+		},
+		{
+			ops: []string{".containsIP('2001:db8:3333:4444:5555:6666:7777:8888')"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 5, Max: c.Max + 8}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 5 },
+		},
+		{
+			ops: []string{".containsIP('2001:db8::1')"},
+			// For operations like checking if an IP is in a CIDR, the cost is expected to higher.
+			expectEsimatedCost: func(c checker.CostEstimate) checker.CostEstimate {
+				return checker.CostEstimate{Min: c.Min + 3, Max: c.Max + 6}
+			},
+			expectRuntimeCost: func(c uint64) uint64 { return c + 3 },
+		},
+	}...)
+
+	for _, tc := range ipv4Cases {
+		for _, op := range tc.ops {
+			t.Run(ipv4+op, func(t *testing.T) {
+				testCost(t, ipv4+op, tc.expectEsimatedCost(ipv4BaseEstimatedCost), tc.expectRuntimeCost(ipv4BaseRuntimeCost))
+			})
+		}
+	}
+
+	for _, tc := range ipv6Cases {
+		for _, op := range tc.ops {
+			t.Run(ipv6+op, func(t *testing.T) {
+				testCost(t, ipv6+op, tc.expectEsimatedCost(ipv6BaseEstimatedCost), tc.expectRuntimeCost(ipv6BaseRuntimeCost))
 			})
 		}
 	}
@@ -371,6 +658,18 @@ func TestAuthzLibrary(t *testing.T) {
 			expectRuntimeCost:   6,
 		},
 		{
+			name:                "fieldSelector",
+			expr:                "authorizer.group('').resource('pods').fieldSelector('spec.nodeName=example-node-name.fully.qualified.domain.name.example.com')",
+			expectEstimatedCost: checker.CostEstimate{Min: 1821, Max: 1821},
+			expectRuntimeCost:   1821, // authorizer(1) + group(1) + resource(1) + fieldSelector(10 + ceil(71/2)*50=1800 + ceil(71*.1)=8)
+		},
+		{
+			name:                "labelSelector",
+			expr:                "authorizer.group('').resource('pods').labelSelector('spec.nodeName=example-node-name.fully.qualified.domain.name.example.com')",
+			expectEstimatedCost: checker.CostEstimate{Min: 1821, Max: 1821},
+			expectRuntimeCost:   1821, // authorizer(1) + group(1) + resource(1) + fieldSelector(10 + ceil(71/2)*50=1800 + ceil(71*.1)=8)
+		},
+		{
 			name:                "path check allowed",
 			expr:                "authorizer.path('/healthz').check('get').allowed()",
 			expectEstimatedCost: checker.CostEstimate{Min: 350003, Max: 350003},
@@ -437,19 +736,19 @@ func TestQuantityCost(t *testing.T) {
 		{
 			name:                "equality_reflexivity",
 			expr:                `quantity("200M") == quantity("200M")`,
-			expectEstimatedCost: checker.CostEstimate{Min: 3, Max: 1844674407370955266},
+			expectEstimatedCost: checker.CostEstimate{Min: 3, Max: 3},
 			expectRuntimeCost:   3,
 		},
 		{
 			name:                "equality_symmetry",
 			expr:                `quantity("200M") == quantity("0.2G") && quantity("0.2G") == quantity("200M")`,
-			expectEstimatedCost: checker.CostEstimate{Min: 3, Max: 3689348814741910532},
+			expectEstimatedCost: checker.CostEstimate{Min: 3, Max: 6},
 			expectRuntimeCost:   6,
 		},
 		{
 			name:                "equality_transitivity",
 			expr:                `quantity("2M") == quantity("0.002G") && quantity("2000k") == quantity("2M") && quantity("0.002G") == quantity("2000k")`,
-			expectEstimatedCost: checker.CostEstimate{Min: 3, Max: 5534023222112865798},
+			expectEstimatedCost: checker.CostEstimate{Min: 3, Max: 9},
 			expectRuntimeCost:   9,
 		},
 		{
@@ -473,19 +772,19 @@ func TestQuantityCost(t *testing.T) {
 		{
 			name:                "add_quantity",
 			expr:                `quantity("50k").add(quantity("20")) == quantity("50.02k")`,
-			expectEstimatedCost: checker.CostEstimate{Min: 5, Max: 1844674407370955268},
+			expectEstimatedCost: checker.CostEstimate{Min: 5, Max: 5},
 			expectRuntimeCost:   5,
 		},
 		{
 			name:                "sub_quantity",
 			expr:                `quantity("50k").sub(quantity("20")) == quantity("49.98k")`,
-			expectEstimatedCost: checker.CostEstimate{Min: 5, Max: 1844674407370955268},
+			expectEstimatedCost: checker.CostEstimate{Min: 5, Max: 5},
 			expectRuntimeCost:   5,
 		},
 		{
 			name:                "sub_int",
 			expr:                `quantity("50k").sub(20) == quantity("49980")`,
-			expectEstimatedCost: checker.CostEstimate{Min: 4, Max: 1844674407370955267},
+			expectEstimatedCost: checker.CostEstimate{Min: 4, Max: 4},
 			expectRuntimeCost:   4,
 		},
 		{
@@ -517,6 +816,54 @@ func TestQuantityCost(t *testing.T) {
 			expr:                `quantity("50.703k").asApproximateFloat() > 0.0`,
 			expectEstimatedCost: checker.CostEstimate{Min: 3, Max: 3},
 			expectRuntimeCost:   3,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testCost(t, tc.expr, tc.expectEstimatedCost, tc.expectRuntimeCost)
+		})
+	}
+}
+
+func TestNameFormatCost(t *testing.T) {
+	cases := []struct {
+		name                string
+		expr                string
+		expectEstimatedCost checker.CostEstimate
+		expectRuntimeCost   uint64
+	}{
+		{
+			name:                "format.named",
+			expr:                `format.named("dns1123subdomain")`,
+			expectEstimatedCost: checker.CostEstimate{Min: 1, Max: 1},
+			expectRuntimeCost:   1,
+		},
+		{
+			name: "format.dns1123Subdomain.validate",
+			expr: `format.named("dns1123Subdomain").value().validate("my-name")`,
+			// Estimated cost doesnt know value at runtime so it is
+			// using an estimated maximum regex length
+			expectEstimatedCost: checker.CostEstimate{Min: 34, Max: 34},
+			expectRuntimeCost:   17,
+		},
+		{
+			name:                "format.dns1123label.validate",
+			expr:                `format.named("dns1123Label").value().validate("my-name")`,
+			expectEstimatedCost: checker.CostEstimate{Min: 34, Max: 34},
+			expectRuntimeCost:   10,
+		},
+		{
+			name:                "format.dns1123label.validate",
+			expr:                `format.named("dns1123Label").value().validate("my-name")`,
+			expectEstimatedCost: checker.CostEstimate{Min: 34, Max: 34},
+			expectRuntimeCost:   10,
+		},
+		{
+			name:                "format.dns1123label.validate",
+			expr:                `format.named("dns1123Label").value() == format.named("dns1123Label").value()`,
+			expectEstimatedCost: checker.CostEstimate{Min: 5, Max: 11},
+			expectRuntimeCost:   5,
 		},
 	}
 
@@ -758,6 +1105,10 @@ func TestSetsCost(t *testing.T) {
 }
 
 func testCost(t *testing.T, expr string, expectEsimatedCost checker.CostEstimate, expectRuntimeCost uint64) {
+	originalPanicOnUnknown := panicOnUnknown
+	panicOnUnknown = true
+	t.Cleanup(func() { panicOnUnknown = originalPanicOnUnknown })
+
 	est := &CostEstimator{SizeEstimator: &testCostEstimator{}}
 	env, err := cel.NewEnv(
 		ext.Strings(ext.StringsVersion(2)),
@@ -765,8 +1116,13 @@ func testCost(t *testing.T, expr string, expectEsimatedCost checker.CostEstimate
 		Regex(),
 		Lists(),
 		Authz(),
+		AuthzSelectors(),
 		Quantity(),
 		ext.Sets(),
+		IP(),
+		CIDR(),
+		Format(),
+		cel.OptionalTypes(),
 		// cel-go v0.17.7 introduced CostEstimatorOptions.
 		// Previous the presence has a cost of 0 but cel fixed it to 1. We still set to 0 here to avoid breaking changes.
 		cel.CostEstimatorOptions(checker.PresenceTestHasCost(false)),
@@ -780,7 +1136,11 @@ func testCost(t *testing.T, expr string, expectEsimatedCost checker.CostEstimate
 	}
 	compiled, issues := env.Compile(expr)
 	if len(issues.Errors()) > 0 {
-		t.Fatalf("%v", issues.Errors())
+		var errList []string
+		for _, issue := range issues.Errors() {
+			errList = append(errList, issue.ToDisplayString(common.NewTextSource(expr)))
+		}
+		t.Fatalf("%v", errList)
 	}
 	estCost, err := env.EstimateCost(compiled, est)
 	if err != nil {
@@ -865,13 +1225,18 @@ func TestSize(t *testing.T) {
 			expectSize: checker.SizeEstimate{Min: 2, Max: 4},
 		},
 	}
+
+	originalPanicOnUnknown := panicOnUnknown
+	panicOnUnknown = true
+	t.Cleanup(func() { panicOnUnknown = originalPanicOnUnknown })
+
 	est := &CostEstimator{SizeEstimator: &testCostEstimator{}}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var targetNode checker.AstNode = testSizeNode{size: tc.targetSize}
+			var targetNode checker.AstNode = testNode{size: tc.targetSize}
 			argNodes := make([]checker.AstNode, len(tc.argSizes))
 			for i, arg := range tc.argSizes {
-				argNodes[i] = testSizeNode{size: arg}
+				argNodes[i] = testNode{size: arg}
 			}
 			result := est.EstimateCallCost(tc.function, tc.overload, &targetNode, argNodes)
 			if result.ResultSize == nil {
@@ -884,23 +1249,63 @@ func TestSize(t *testing.T) {
 	}
 }
 
-type testSizeNode struct {
+// TestTypeEquality ensures that cost is tested for all custom types used by Kubernetes libraries.
+func TestTypeEquality(t *testing.T) {
+	examples := map[string]ref.Val{
+		// Add example ref.Val's for custom types in Kubernetes here:
+		"kubernetes.authorization.Authorizer":    authorizerVal{},
+		"kubernetes.authorization.PathCheck":     pathCheckVal{},
+		"kubernetes.authorization.GroupCheck":    groupCheckVal{},
+		"kubernetes.authorization.ResourceCheck": resourceCheckVal{},
+		"kubernetes.authorization.Decision":      decisionVal{},
+		"kubernetes.URL":                         apiservercel.URL{},
+		"kubernetes.Quantity":                    apiservercel.Quantity{},
+		"net.IP":                                 apiservercel.IP{},
+		"net.CIDR":                               apiservercel.CIDR{},
+		"kubernetes.NamedFormat":                 apiservercel.Format{},
+		"kubernetes.Semver":                      apiservercel.Semver{},
+	}
+
+	originalPanicOnUnknown := panicOnUnknown
+	panicOnUnknown = true
+	t.Cleanup(func() { panicOnUnknown = originalPanicOnUnknown })
+	est := &CostEstimator{SizeEstimator: &testCostEstimator{}}
+
+	for _, lib := range KnownLibraries() {
+		for _, kt := range lib.Types() {
+			t.Run(kt.TypeName(), func(t *testing.T) {
+				typeNode := testNode{size: checker.SizeEstimate{Min: 10, Max: 100}, typ: kt}
+				est.EstimateCallCost("_==_", "", nil, []checker.AstNode{typeNode, typeNode})
+				ex, ok := examples[kt.TypeName()]
+				if !ok {
+					t.Errorf("missing example for type: %s", kt.TypeName())
+				}
+				est.CallCost("_==_", "", []ref.Val{ex, ex}, nil)
+			})
+		}
+	}
+}
+
+type testNode struct {
 	size checker.SizeEstimate
+	typ  *types.Type
 }
 
-func (t testSizeNode) Path() []string {
+var _ checker.AstNode = (*testNode)(nil)
+
+func (t testNode) Path() []string {
 	return nil // not needed
 }
 
-func (t testSizeNode) Type() *types.Type {
+func (t testNode) Type() *types.Type {
+	return t.typ // not needed
+}
+
+func (t testNode) Expr() ast.Expr {
 	return nil // not needed
 }
 
-func (t testSizeNode) Expr() *exprpb.Expr {
-	return nil // not needed
-}
-
-func (t testSizeNode) ComputedSize() *checker.SizeEstimate {
+func (t testNode) ComputedSize() *checker.SizeEstimate {
 	return &t.size
 }
 

@@ -174,20 +174,20 @@ func getAllocatableMemoryFromStateFile(s *state.MemoryManagerCheckpoint) []state
 	return allocatableMemory
 }
 
-type kubeletParams struct {
-	memoryManagerPolicy  string
+type memoryManagerKubeletParams struct {
+	policy               string
 	systemReservedMemory []kubeletconfig.MemoryReservation
 	systemReserved       map[string]string
 	kubeReserved         map[string]string
 	evictionHard         map[string]string
 }
 
-func updateKubeletConfigWithMemoryManagerParams(initialCfg *kubeletconfig.KubeletConfiguration, params *kubeletParams) {
+func updateKubeletConfigWithMemoryManagerParams(initialCfg *kubeletconfig.KubeletConfiguration, params *memoryManagerKubeletParams) {
 	if initialCfg.FeatureGates == nil {
 		initialCfg.FeatureGates = map[string]bool{}
 	}
 
-	initialCfg.MemoryManagerPolicy = params.memoryManagerPolicy
+	initialCfg.MemoryManagerPolicy = params.policy
 
 	// update system-reserved
 	if initialCfg.SystemReserved == nil {
@@ -256,7 +256,7 @@ var _ = SIGDescribe("Memory Manager", framework.WithDisruptive(), framework.With
 	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 
 	memoryQuantity := resource.MustParse("1100Mi")
-	defaultKubeParams := &kubeletParams{
+	defaultKubeParams := &memoryManagerKubeletParams{
 		systemReservedMemory: []kubeletconfig.MemoryReservation{
 			{
 				NumaNode: 0,
@@ -366,7 +366,7 @@ var _ = SIGDescribe("Memory Manager", framework.WithDisruptive(), framework.With
 	ginkgo.Context("with static policy", func() {
 		tempSetCurrentKubeletConfig(f, func(ctx context.Context, initialConfig *kubeletconfig.KubeletConfiguration) {
 			kubeParams := *defaultKubeParams
-			kubeParams.memoryManagerPolicy = staticPolicy
+			kubeParams.policy = staticPolicy
 			updateKubeletConfigWithMemoryManagerParams(initialConfig, &kubeParams)
 		})
 
@@ -543,7 +543,7 @@ var _ = SIGDescribe("Memory Manager", framework.WithDisruptive(), framework.With
 								for _, containerMemory := range containerResource.Memory {
 									q := c.Resources.Limits[v1.ResourceName(containerMemory.MemoryType)]
 									value, ok := q.AsInt64()
-									gomega.Expect(ok).To(gomega.BeTrue())
+									gomega.Expect(ok).To(gomega.BeTrueBecause("cannot convert value to integer"))
 									gomega.Expect(value).To(gomega.BeEquivalentTo(containerMemory.Size_))
 								}
 							}
@@ -626,9 +626,9 @@ var _ = SIGDescribe("Memory Manager", framework.WithDisruptive(), framework.With
 
 					return true
 				}, time.Minute, 5*time.Second).Should(
-					gomega.BeTrue(),
-					"the pod succeeded to start, when it should fail with the admission error",
-				)
+					gomega.BeTrueBecause(
+						"the pod succeeded to start, when it should fail with the admission error",
+					))
 			})
 
 			ginkgo.JustAfterEach(func(ctx context.Context) {
@@ -644,7 +644,7 @@ var _ = SIGDescribe("Memory Manager", framework.WithDisruptive(), framework.With
 	ginkgo.Context("with none policy", func() {
 		tempSetCurrentKubeletConfig(f, func(ctx context.Context, initialConfig *kubeletconfig.KubeletConfiguration) {
 			kubeParams := *defaultKubeParams
-			kubeParams.memoryManagerPolicy = nonePolicy
+			kubeParams.policy = nonePolicy
 			updateKubeletConfigWithMemoryManagerParams(initialConfig, &kubeParams)
 		})
 

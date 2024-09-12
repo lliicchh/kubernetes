@@ -184,7 +184,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local", func() {
 
 	for tempTestVolType := range setupLocalVolumeMap {
 
-		// New variable required for gingko test closures
+		// New variable required for ginkgo test closures
 		testVolType := tempTestVolType
 		args := []interface{}{fmt.Sprintf("[Volume type: %s]", testVolType)}
 		if testVolType == GCELocalSSDVolumeType {
@@ -294,7 +294,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local", func() {
 					e2epod.DeletePodOrFail(ctx, config.client, config.ns, pod2.Name)
 				})
 
-				ginkgo.It("should set different fsGroup for second pod if first pod is deleted [Flaky]", func(ctx context.Context) {
+				f.It("should set different fsGroup for second pod if first pod is deleted", f.WithFlaky(), func(ctx context.Context) {
 					// TODO: Disabled temporarily, remove [Flaky] tag after #73168 is fixed.
 					fsGroup1, fsGroup2 := int64(1234), int64(4321)
 					ginkgo.By("Create first pod and check fsGroup is set")
@@ -325,10 +325,10 @@ var _ = utils.SIGDescribe("PersistentVolumes-local", func() {
 			}
 			ginkgo.By("Creating local PVC and PV")
 			createLocalPVCsPVs(ctx, config, []*localTestVolume{testVol}, immediateMode)
-			pod, err := createLocalPod(ctx, config, testVol, nil)
-			framework.ExpectError(err)
-			err = e2epod.WaitTimeoutForPodRunningInNamespace(ctx, config.client, pod.Name, pod.Namespace, f.Timeouts.PodStart)
-			framework.ExpectError(err)
+			// createLocalPod will create a pod and wait for it to be running. In this case,
+			// It's expected that the Pod fails to start.
+			_, err := createLocalPod(ctx, config, testVol, nil)
+			gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("is not Running")))
 			cleanupLocalPVCsPVs(ctx, config, []*localTestVolume{testVol})
 		})
 
@@ -348,8 +348,8 @@ var _ = utils.SIGDescribe("PersistentVolumes-local", func() {
 			pod, err := config.client.CoreV1().Pods(config.ns).Create(ctx, pod, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
 
-			err = e2epod.WaitTimeoutForPodRunningInNamespace(ctx, config.client, pod.Name, pod.Namespace, f.Timeouts.PodStart)
-			framework.ExpectError(err)
+			getPod := e2epod.Get(f.ClientSet, pod)
+			gomega.Consistently(ctx, getPod, f.Timeouts.PodStart, 2*time.Second).ShouldNot(e2epod.BeInPhase(v1.PodRunning))
 
 			cleanupLocalVolumes(ctx, config, []*localTestVolume{testVol})
 		})

@@ -18,9 +18,10 @@ package stats
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	cadvisorapiv1 "github.com/google/cadvisor/info/v1"
+	cadvisormemory "github.com/google/cadvisor/cache/memory"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	internalapi "k8s.io/cri-api/pkg/apis"
@@ -114,6 +115,9 @@ func (p *Provider) RlimitStats() (*statsapi.RlimitStats, error) {
 func (p *Provider) GetCgroupStats(cgroupName string, updateStats bool) (*statsapi.ContainerStats, *statsapi.NetworkStats, error) {
 	info, err := getCgroupInfo(p.cadvisor, cgroupName, updateStats)
 	if err != nil {
+		if errors.Is(err, cadvisormemory.ErrDataNotFound) {
+			return nil, nil, fmt.Errorf("cgroup stats not found for %q: %w", cgroupName, cadvisormemory.ErrDataNotFound)
+		}
 		return nil, nil, fmt.Errorf("failed to get cgroup stats for %q: %v", cgroupName, err)
 	}
 	// Rootfs and imagefs doesn't make sense for raw cgroup.
@@ -127,6 +131,9 @@ func (p *Provider) GetCgroupStats(cgroupName string, updateStats bool) (*statsap
 func (p *Provider) GetCgroupCPUAndMemoryStats(cgroupName string, updateStats bool) (*statsapi.ContainerStats, error) {
 	info, err := getCgroupInfo(p.cadvisor, cgroupName, updateStats)
 	if err != nil {
+		if errors.Is(err, cadvisormemory.ErrDataNotFound) {
+			return nil, fmt.Errorf("cgroup stats not found for %q: %w", cgroupName, cadvisormemory.ErrDataNotFound)
+		}
 		return nil, fmt.Errorf("failed to get cgroup stats for %q: %v", cgroupName, err)
 	}
 	// Rootfs and imagefs doesn't make sense for raw cgroup.
@@ -162,44 +169,6 @@ func (p *Provider) RootFsStats() (*statsapi.FsStats, error) {
 		InodesFree:     rootFsInfo.InodesFree,
 		Inodes:         rootFsInfo.Inodes,
 		InodesUsed:     nodeFsInodesUsed,
-	}, nil
-}
-
-// GetContainerInfo returns stats (from cAdvisor) for a container.
-func (p *Provider) GetContainerInfo(ctx context.Context, podFullName string, podUID types.UID, containerName string, req *cadvisorapiv1.ContainerInfoRequest) (*cadvisorapiv1.ContainerInfo, error) {
-	// Resolve and type convert back again.
-	// We need the static pod UID but the kubecontainer API works with types.UID.
-	podUID = types.UID(p.podManager.TranslatePodUID(podUID))
-
-	pods, err := p.runtimeCache.GetPods(ctx)
-	if err != nil {
-		return nil, err
-	}
-	pod := kubecontainer.Pods(pods).FindPod(podFullName, podUID)
-	container := pod.FindContainerByName(containerName)
-	if container == nil {
-		return nil, kubecontainer.ErrContainerNotFound
-	}
-
-	ci, err := p.cadvisor.DockerContainer(container.ID.ID, req)
-	if err != nil {
-		return nil, err
-	}
-	return &ci, nil
-}
-
-// GetRawContainerInfo returns the stats (from cadvisor) for a non-Kubernetes
-// container.
-func (p *Provider) GetRawContainerInfo(containerName string, req *cadvisorapiv1.ContainerInfoRequest, subcontainers bool) (map[string]*cadvisorapiv1.ContainerInfo, error) {
-	if subcontainers {
-		return p.cadvisor.SubcontainerInfo(containerName, req)
-	}
-	containerInfo, err := p.cadvisor.ContainerInfo(containerName, req)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]*cadvisorapiv1.ContainerInfo{
-		containerInfo.Name: containerInfo,
 	}, nil
 }
 

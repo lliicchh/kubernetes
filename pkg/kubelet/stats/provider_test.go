@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	cadvisorapiv1 "github.com/google/cadvisor/info/v1"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
 	fuzz "github.com/google/gofuzz"
@@ -33,11 +32,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	cadvisortest "k8s.io/kubernetes/pkg/kubelet/cadvisor/testing"
-	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	kubecontainertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	kubepodtest "k8s.io/kubernetes/pkg/kubelet/pod/testing"
 	serverstats "k8s.io/kubernetes/pkg/kubelet/server/stats"
-	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/volume"
 )
 
@@ -78,11 +75,8 @@ func TestGetCgroupStats(t *testing.T) {
 		updateStats       = false
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -115,11 +109,8 @@ func TestGetCgroupCPUAndMemoryStats(t *testing.T) {
 		updateStats       = false
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -149,11 +140,8 @@ func TestRootFsStats(t *testing.T) {
 		containerInfoSeed = 2000
 	)
 
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
 	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+		mockCadvisor     = cadvisortest.NewMockInterface(t)
 		mockPodManager   = new(kubepodtest.MockManager)
 		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 
@@ -179,244 +167,8 @@ func TestRootFsStats(t *testing.T) {
 	assert.Equal(*rootFsInfo.Inodes-*rootFsInfo.InodesFree, *stats.InodesUsed)
 }
 
-func TestGetContainerInfo(t *testing.T) {
-	ctx := context.Background()
-	cadvisorAPIFailure := fmt.Errorf("cAdvisor failure")
-	runtimeError := fmt.Errorf("List containers error")
-	tests := []struct {
-		name                      string
-		containerID               string
-		containerPath             string
-		cadvisorContainerInfo     cadvisorapiv1.ContainerInfo
-		runtimeError              error
-		podList                   []*kubecontainer.Pod
-		requestedPodFullName      string
-		requestedPodUID           types.UID
-		requestedContainerName    string
-		expectDockerContainerCall bool
-		mockError                 error
-		expectedError             error
-		expectStats               bool
-	}{
-		{
-			name:          "get container info",
-			containerID:   "ab2cdf",
-			containerPath: "/docker/ab2cdf",
-			cadvisorContainerInfo: cadvisorapiv1.ContainerInfo{
-				ContainerReference: cadvisorapiv1.ContainerReference{
-					Name: "/docker/ab2cdf",
-				},
-			},
-			runtimeError: nil,
-			podList: []*kubecontainer.Pod{
-				{
-					ID:        "12345678",
-					Name:      "qux",
-					Namespace: "ns",
-					Containers: []*kubecontainer.Container{
-						{
-							Name: "foo",
-							ID:   kubecontainer.ContainerID{Type: "test", ID: "ab2cdf"},
-						},
-					},
-				},
-			},
-			requestedPodFullName:      "qux_ns",
-			requestedPodUID:           "",
-			requestedContainerName:    "foo",
-			expectDockerContainerCall: true,
-			mockError:                 nil,
-			expectedError:             nil,
-			expectStats:               true,
-		},
-		{
-			name:                  "get container info when cadvisor failed",
-			containerID:           "ab2cdf",
-			containerPath:         "/docker/ab2cdf",
-			cadvisorContainerInfo: cadvisorapiv1.ContainerInfo{},
-			runtimeError:          nil,
-			podList: []*kubecontainer.Pod{
-				{
-					ID:        "uuid",
-					Name:      "qux",
-					Namespace: "ns",
-					Containers: []*kubecontainer.Container{
-						{
-							Name: "foo",
-							ID:   kubecontainer.ContainerID{Type: "test", ID: "ab2cdf"},
-						},
-					},
-				},
-			},
-			requestedPodFullName:      "qux_ns",
-			requestedPodUID:           "uuid",
-			requestedContainerName:    "foo",
-			expectDockerContainerCall: true,
-			mockError:                 cadvisorAPIFailure,
-			expectedError:             cadvisorAPIFailure,
-			expectStats:               false,
-		},
-		{
-			name:                      "get container info on non-existent container",
-			containerID:               "",
-			containerPath:             "",
-			cadvisorContainerInfo:     cadvisorapiv1.ContainerInfo{},
-			runtimeError:              nil,
-			podList:                   []*kubecontainer.Pod{},
-			requestedPodFullName:      "qux",
-			requestedPodUID:           "",
-			requestedContainerName:    "foo",
-			expectDockerContainerCall: false,
-			mockError:                 nil,
-			expectedError:             kubecontainer.ErrContainerNotFound,
-			expectStats:               false,
-		},
-		{
-			name:                   "get container info when container runtime failed",
-			containerID:            "",
-			containerPath:          "",
-			cadvisorContainerInfo:  cadvisorapiv1.ContainerInfo{},
-			runtimeError:           runtimeError,
-			podList:                []*kubecontainer.Pod{},
-			requestedPodFullName:   "qux",
-			requestedPodUID:        "",
-			requestedContainerName: "foo",
-			mockError:              nil,
-			expectedError:          runtimeError,
-			expectStats:            false,
-		},
-		{
-			name:                   "get container info with no containers",
-			containerID:            "",
-			containerPath:          "",
-			cadvisorContainerInfo:  cadvisorapiv1.ContainerInfo{},
-			runtimeError:           nil,
-			podList:                []*kubecontainer.Pod{},
-			requestedPodFullName:   "qux_ns",
-			requestedPodUID:        "",
-			requestedContainerName: "foo",
-			mockError:              nil,
-			expectedError:          kubecontainer.ErrContainerNotFound,
-			expectStats:            false,
-		},
-		{
-			name:                  "get container info with no matching containers",
-			containerID:           "",
-			containerPath:         "",
-			cadvisorContainerInfo: cadvisorapiv1.ContainerInfo{},
-			runtimeError:          nil,
-			podList: []*kubecontainer.Pod{
-				{
-					ID:        "12345678",
-					Name:      "qux",
-					Namespace: "ns",
-					Containers: []*kubecontainer.Container{
-						{
-							Name: "bar",
-							ID:   kubecontainer.ContainerID{Type: "test", ID: "fakeID"},
-						},
-					},
-				},
-			},
-			requestedPodFullName:   "qux_ns",
-			requestedPodUID:        "",
-			requestedContainerName: "foo",
-			mockError:              nil,
-			expectedError:          kubecontainer.ErrContainerNotFound,
-			expectStats:            false,
-		},
-	}
-
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	for _, tc := range tests {
-		var (
-			mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
-			mockPodManager   = kubepodtest.NewMockManager(mockCtrl)
-			mockRuntimeCache = kubecontainertest.NewMockRuntimeCache(mockCtrl)
-
-			cadvisorReq = &cadvisorapiv1.ContainerInfoRequest{}
-		)
-
-		mockPodManager.EXPECT().TranslatePodUID(tc.requestedPodUID).Return(kubetypes.ResolvedPodUID(tc.requestedPodUID))
-		mockRuntimeCache.EXPECT().GetPods(ctx).Return(tc.podList, tc.runtimeError)
-		if tc.expectDockerContainerCall {
-			mockCadvisor.EXPECT().DockerContainer(tc.containerID, cadvisorReq).Return(tc.cadvisorContainerInfo, tc.mockError)
-		}
-
-		provider := newStatsProvider(mockCadvisor, mockPodManager, mockRuntimeCache, fakeContainerStatsProvider{})
-		stats, err := provider.GetContainerInfo(ctx, tc.requestedPodFullName, tc.requestedPodUID, tc.requestedContainerName, cadvisorReq)
-		assert.Equal(t, tc.expectedError, err)
-
-		if tc.expectStats {
-			require.NotNil(t, stats)
-		}
-	}
-}
-
-func TestGetRawContainerInfoRoot(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
-		mockPodManager   = new(kubepodtest.MockManager)
-		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
-
-		cadvisorReq   = &cadvisorapiv1.ContainerInfoRequest{}
-		containerPath = "/"
-		containerInfo = &cadvisorapiv1.ContainerInfo{
-			ContainerReference: cadvisorapiv1.ContainerReference{
-				Name: containerPath,
-			},
-		}
-	)
-
-	mockCadvisor.EXPECT().ContainerInfo(containerPath, cadvisorReq).Return(containerInfo, nil)
-
-	provider := newStatsProvider(mockCadvisor, mockPodManager, mockRuntimeCache, fakeContainerStatsProvider{})
-	_, err := provider.GetRawContainerInfo(containerPath, cadvisorReq, false)
-	assert.NoError(t, err)
-}
-
-func TestGetRawContainerInfoSubcontainers(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
-
-	var (
-		mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
-		mockPodManager   = new(kubepodtest.MockManager)
-		mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
-
-		cadvisorReq   = &cadvisorapiv1.ContainerInfoRequest{}
-		containerPath = "/kubelet"
-		containerInfo = map[string]*cadvisorapiv1.ContainerInfo{
-			containerPath: {
-				ContainerReference: cadvisorapiv1.ContainerReference{
-					Name: containerPath,
-				},
-			},
-			"/kubelet/sub": {
-				ContainerReference: cadvisorapiv1.ContainerReference{
-					Name: "/kubelet/sub",
-				},
-			},
-		}
-	)
-
-	mockCadvisor.EXPECT().SubcontainerInfo(containerPath, cadvisorReq).Return(containerInfo, nil)
-
-	provider := newStatsProvider(mockCadvisor, mockPodManager, mockRuntimeCache, fakeContainerStatsProvider{})
-	result, err := provider.GetRawContainerInfo(containerPath, cadvisorReq, true)
-	assert.NoError(t, err)
-	assert.Len(t, result, 2)
-}
-
 func TestHasDedicatedImageFs(t *testing.T) {
 	ctx := context.Background()
-	mockCtrl := gomock.NewController(t)
-	defer mockCtrl.Finish()
 	imageStatsExpected := &statsapi.FsStats{AvailableBytes: uint64Ptr(1)}
 
 	for desc, test := range map[string]struct {
@@ -449,7 +201,7 @@ func TestHasDedicatedImageFs(t *testing.T) {
 	} {
 		t.Logf("TestCase %q", desc)
 		var (
-			mockCadvisor     = cadvisortest.NewMockInterface(mockCtrl)
+			mockCadvisor     = cadvisortest.NewMockInterface(t)
 			mockPodManager   = new(kubepodtest.MockManager)
 			mockRuntimeCache = new(kubecontainertest.MockRuntimeCache)
 		)
@@ -675,7 +427,7 @@ func checkNetworkStats(t *testing.T, label string, seed int, stats *statsapi.Net
 	assert.EqualValues(t, seed+offsetNetTxBytes, *stats.TxBytes, label+".Net.TxBytes")
 	assert.EqualValues(t, seed+offsetNetTxErrors, *stats.TxErrors, label+".Net.TxErrors")
 
-	assert.EqualValues(t, 2, len(stats.Interfaces), "network interfaces should contain 2 elements")
+	assert.Len(t, stats.Interfaces, 2, "network interfaces should contain 2 elements")
 
 	assert.EqualValues(t, "eth0", stats.Interfaces[0].Name, "default interface name is not eth0")
 	assert.EqualValues(t, seed+offsetNetRxBytes, *stats.Interfaces[0].RxBytes, label+".Net.TxErrors")
